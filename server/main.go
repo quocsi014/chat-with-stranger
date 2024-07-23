@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 
 	"golang.org/x/net/websocket"
 )
@@ -23,6 +24,7 @@ func generateRandomString(n int) (string, error) {
 
 type Server struct {
 	rooms map[string]*Room
+	mu sync.Mutex
 }
 
 type Room struct {
@@ -33,6 +35,7 @@ type Room struct {
 func NewServer() *Server {
 	return &Server{
 		rooms: make(map[string]*Room),
+		mu: sync.Mutex{},
 	}
 }
 
@@ -113,17 +116,28 @@ func (s *Server) readLoop(ws *websocket.Conn, roomKey string) {
 		msg := buf[:n]
 		s.broastcast(roomKey, msg, ws)
 	}
+
+	s.mu.Lock()
+	s.broastcast(roomKey, []byte(fmt.Sprintf("%s has left",s.rooms[roomKey].conns[ws])), ws)
+	delete(s.rooms[roomKey].conns, ws)
+	if len(s.rooms[roomKey].conns) == 0{
+		delete(s.rooms, roomKey)
+	}
+	s.mu.Unlock()
+
 }
 
-func (s *Server)broastcast(roomKey string, msg []byte, sender *websocket.Conn){
+func (s *Server) broastcast(roomKey string, msg []byte, sender *websocket.Conn) {
 	strMsg := fmt.Sprintf("%s: ", s.rooms[roomKey].conns[sender]) + string(msg)
-	for ws := range s.rooms[roomKey].conns{
-		ws.Write([]byte(strMsg))
+	for ws := range s.rooms[roomKey].conns {
+		if ws != sender {
+			ws.Write([]byte(strMsg))
+		}
 	}
 }
 
 func main() {
 	server := NewServer()
 	http.Handle("/ws", websocket.Handler(server.handleWS))
-	http.ListenAndServe(":3000", nil)
+	http.ListenAndServe(":8080", nil)
 }
