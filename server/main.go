@@ -111,7 +111,7 @@ func (s *Server) handleWS(ws *websocket.Conn) {
 func (s *Server) readLoop(user *User) {
 	buf := make([]byte, 1024)
 	for {
-		_, err := user.conn.Read(buf)
+		n, err := user.conn.Read(buf)
 		if err != nil {
 			if err == io.EOF {
 				break
@@ -120,7 +120,7 @@ func (s *Server) readLoop(user *User) {
 			continue
 		}
 
-		mes := NewMessage(user.name, string(buf), false)
+		mes := NewMessage(user.name, string(buf[:n]), false)
 		if mesBytes, err := json.Marshal(mes); err != nil{
 			log.Fatal("Error encoding")
 		}else{
