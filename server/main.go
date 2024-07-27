@@ -3,11 +3,14 @@ package main
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"sync"
 
+	"github.com/quocsi014/util"
 	"golang.org/x/net/websocket"
 )
 
@@ -22,89 +25,93 @@ func generateRandomString(n int) (string, error) {
 	return base64.URLEncoding.EncodeToString(b)[:n], nil
 }
 
-type Server struct {
-	rooms map[string]*Room
-	mu sync.Mutex
+type User struct{
+	name string
+	conn *websocket.Conn
 }
 
-type Room struct {
-	conns          map[*websocket.Conn]string
-	anonymous_user int
+type Server struct {
+	pair map[*User]*User
+	mu sync.Mutex
+	user_queue util.Queue
 }
+
+
+type Message struct {
+	UserName string `json:"user_name"`
+	IsSystem bool `json:"is_system"`
+	Message string `json:"message"`
+}
+
 
 func NewServer() *Server {
 	return &Server{
-		rooms: make(map[string]*Room),
+		pair: make(map[*User]*User),
 		mu: sync.Mutex{},
+		user_queue: *util.NewQueue(),
 	}
 }
 
-func NewRoom() *Room {
-	return &Room{
-		conns:          make(map[*websocket.Conn]string),
-		anonymous_user: 0,
+func NewUser(name string, conn *websocket.Conn) *User{
+	return &User{
+		name: name,
+		conn: conn,
+	}
+}
+
+func NewMessage(userName, message string, isSystem bool) Message{
+	return Message{
+		UserName: userName,
+		Message: message,
+		IsSystem: isSystem,
 	}
 }
 
 func (s *Server) handleWS(ws *websocket.Conn) {
 
 	query := ws.Request().URL.Query()
-	key := query.Get("room_key")
 	name := query.Get("name")
 
-	if key == "" {
-		var errCreateKey error
-		key, errCreateKey = s.createRoomKey()
-		if errCreateKey != nil {
-			ws.Write([]byte("Fail to create key, pls connect again or connect again with room key"))
+	if name == "" {
+		name = "anonymous"
+	}
+
+	user := NewUser(name, ws)
+	
+	iUser := s.user_queue.DeQueue()
+
+	if iUser == nil{
+		s.user_queue.EnQueue(user)
+
+		mes := NewMessage("System", "Pls, Wait another user", true)
+		if mesBytes, err := json.Marshal(mes); err != nil{
+			log.Fatal("Error encoding")
+		}else{
+			ws.Write(mesBytes)
+		}
+	}else{
+		waitingUser := iUser.(*User)
+		s.pair[user] = waitingUser
+		s.pair[waitingUser] = user
+
+		mes := NewMessage("System", fmt.Sprintf("%s joined", user.name), true)
+		if mesBytes, err := json.Marshal(mes); err != nil{
+			log.Fatal("Error encoding")
+		}else{
+			waitingUser.conn.Write(mesBytes)
 		}
 	}
 
-	room, exist := s.rooms[key]
-
-	if exist {
-		if name == "" {
-			name = fmt.Sprintf("anonymous%d", s.rooms[key].anonymous_user)
-		}
-		room.conns[ws] = name
-		for key := range room.conns {
-			key.Write([]byte(fmt.Sprintf("%s joined", name)))
-		}
-	} else {
-		newRoom := NewRoom()
-		if name == "" {
-			name = "anonymous"
-			newRoom.anonymous_user += 1
-
-		}
-		newRoom.conns[ws] = name
-		s.rooms[key] = newRoom
-		ws.Write([]byte(fmt.Sprintf("New room was created with key is %s", key)))
-	}
-
-	s.readLoop(ws, key)
+	
+	s.readLoop(user)
 
 }
 
-func (s *Server) createRoomKey() (string, error) {
-	for {
-		key, err := generateRandomString(10)
-		if err != nil {
-			return "", err
-		}
 
-		_, exist := s.rooms[key]
-		if !exist {
-			return key, nil
-		}
-
-	}
-}
-
-func (s *Server) readLoop(ws *websocket.Conn, roomKey string) {
+func (s *Server) readLoop(user *User) {
 	buf := make([]byte, 1024)
 	for {
-		n, err := ws.Read(buf)
+		_, err := user.conn.Read(buf)
 		if err != nil {
 			if err == io.EOF {
 				break
@@ -113,27 +120,26 @@ func (s *Server) readLoop(ws *websocket.Conn, roomKey string) {
 			continue
 		}
 
-		msg := buf[:n]
-		s.broastcast(roomKey, msg, ws)
+		mes := NewMessage(user.name, string(buf), false)
+		if mesBytes, err := json.Marshal(mes); err != nil{
+			log.Fatal("Error encoding")
+		}else{
+			receiveUser := s.pair[user]
+			receiveUser.conn.Write(mesBytes)
+		}
+
 	}
 
 	s.mu.Lock()
-	s.broastcast(roomKey, []byte(fmt.Sprintf("%s has left",s.rooms[roomKey].conns[ws])), ws)
-	delete(s.rooms[roomKey].conns, ws)
-	if len(s.rooms[roomKey].conns) == 0{
-		delete(s.rooms, roomKey)
-	}
+	mes := NewMessage(user.name, fmt.Sprintf("%s has left", user.name), false)
+		if mesBytes, err := json.Marshal(mes); err != nil{
+			log.Fatal("Error encoding")
+		}else{
+			receiveUser := s.pair[user]
+			receiveUser.conn.Write(mesBytes)
+		}
 	s.mu.Unlock()
 
-}
-
-func (s *Server) broastcast(roomKey string, msg []byte, sender *websocket.Conn) {
-	strMsg := fmt.Sprintf("%s: ", s.rooms[roomKey].conns[sender]) + string(msg)
-	for ws := range s.rooms[roomKey].conns {
-		if ws != sender {
-			ws.Write([]byte(strMsg))
-		}
-	}
 }
 
 func main() {
