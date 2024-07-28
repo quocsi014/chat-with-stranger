@@ -12,7 +12,7 @@ const router = createBrowserRouter([
     element:<HomePage/>
   },
   {
-    path:"/chat/:code",
+    path:"/chat",
     element:<ChatPage/>
   }
 ])
