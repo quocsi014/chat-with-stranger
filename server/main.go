@@ -1,8 +1,6 @@
 package main
 
 import (
-	"crypto/rand"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,55 +12,45 @@ import (
 	"golang.org/x/net/websocket"
 )
 
-func generateRandomString(n int) (string, error) {
-	b := make([]byte, n)
-	_, err := rand.Read(b)
-	if err != nil {
-		return "", err
-	}
 
-	// Encode to base64 to get alphanumeric characters
-	return base64.URLEncoding.EncodeToString(b)[:n], nil
-}
-
-type User struct{
+type User struct {
 	name string
 	conn *websocket.Conn
 }
 
 type Server struct {
-	pair map[*User]*User
-	mu sync.Mutex
+	pair       map[*User]*User
+	mu         sync.Mutex
 	user_queue util.Queue
+	disconnectedUser map[*User]bool
 }
-
 
 type Message struct {
 	UserName string `json:"user_name"`
-	IsSystem bool `json:"is_system"`
-	Message string `json:"message"`
+	IsSystem bool   `json:"is_system"`
+	Message  string `json:"message"`
 }
-
 
 func NewServer() *Server {
 	return &Server{
-		pair: make(map[*User]*User),
-		mu: sync.Mutex{},
+		pair:       make(map[*User]*User),
+		mu:         sync.Mutex{},
 		user_queue: *util.NewQueue(),
+		disconnectedUser: make(map[*User]bool),
 	}
 }
 
-func NewUser(name string, conn *websocket.Conn) *User{
+func NewUser(name string, conn *websocket.Conn) *User {
 	return &User{
 		name: name,
 		conn: conn,
 	}
 }
 
-func NewMessage(userName, message string, isSystem bool) Message{
+func NewMessage(userName, message string, isSystem bool) Message {
 	return Message{
 		UserName: userName,
-		Message: message,
+		Message:  message,
 		IsSystem: isSystem,
 	}
 }
@@ -77,36 +65,68 @@ func (s *Server) handleWS(ws *websocket.Conn) {
 	}
 
 	user := NewUser(name, ws)
-	
-	iUser := s.user_queue.DeQueue()
 
-	if iUser == nil{
-		s.user_queue.EnQueue(user)
+	// iUser := s.user_queue.DeQueue()
 
-		mes := NewMessage("System", "Pls, Wait another user", true)
-		if mesBytes, err := json.Marshal(mes); err != nil{
-			log.Fatal("Error encoding")
-		}else{
-			ws.Write(mesBytes)
-		}
-	}else{
-		waitingUser := iUser.(*User)
-		s.pair[user] = waitingUser
-		s.pair[waitingUser] = user
+	// if iUser == nil {
+	// 	s.user_queue.EnQueue(user)
 
-		mes := NewMessage("System", fmt.Sprintf("%s joined", user.name), true)
-		if mesBytes, err := json.Marshal(mes); err != nil{
-			log.Fatal("Error encoding")
-		}else{
-			waitingUser.conn.Write(mesBytes)
-		}
-	}
+	// 	mes := NewMessage("System", "Pls, Wait another user", true)
+	// 	if mesBytes, err := json.Marshal(mes); err != nil {
+	// 		log.Fatal("Error encoding")
+	// 	} else {
+	// 		ws.Write(mesBytes)
+	// 	}
+	// } else {
+	// 	waitingUser := iUser.(*User)
+	// 	_, ok := s.disconnectedUser[waitingUser]
+	// 	if ok{
 
-	
+	// 	}
+	// 	s.pair[user] = waitingUser
+	// 	s.pair[waitingUser] = user
+
+	// 	mes := NewMessage("System", fmt.Sprintf("%s joined", user.name), true)
+	// 	if mesBytes, err := json.Marshal(mes); err != nil {
+	// 		log.Fatal("Error encoding")
+	// 	} else {
+	// 		waitingUser.conn.Write(mesBytes)
+	// 	}
+	// }
+	s.CreateUserConn(user)
 	s.readLoop(user)
 
 }
 
+func (s *Server)CreateUserConn(user *User){
+	iUser := s.user_queue.DeQueue()
+
+	if iUser == nil {
+		s.user_queue.EnQueue(user)
+
+		mes := NewMessage("System", "Pls, Wait another user", true)
+		if mesBytes, err := json.Marshal(mes); err != nil {
+			log.Fatal("Error encoding")
+		} else {
+			user.conn.Write(mesBytes)
+		}
+	} else {
+		waitingUser := iUser.(*User)
+		_, ok := s.disconnectedUser[waitingUser]
+		if ok{
+			s.CreateUserConn(user)
+		}
+		s.pair[user] = waitingUser
+		s.pair[waitingUser] = user
+
+		mes := NewMessage("System", fmt.Sprintf("%s joined", user.name), true)
+		if mesBytes, err := json.Marshal(mes); err != nil {
+			log.Fatal("Error encoding")
+		} else {
+			waitingUser.conn.Write(mesBytes)
+		}
+	}
+}
 
 func (s *Server) readLoop(user *User) {
 	buf := make([]byte, 1024)
@@ -121,24 +141,32 @@ func (s *Server) readLoop(user *User) {
 		}
 
 		mes := NewMessage(user.name, string(buf[:n]), false)
-		if mesBytes, err := json.Marshal(mes); err != nil{
+		if mesBytes, err := json.Marshal(mes); err != nil {
 			log.Fatal("Error encoding")
-		}else{
+		} else {
 			receiveUser := s.pair[user]
 			receiveUser.conn.Write(mesBytes)
 		}
 
 	}
 
-	s.mu.Lock()
-	mes := NewMessage(user.name, fmt.Sprintf("%s has left", user.name), false)
-		if mesBytes, err := json.Marshal(mes); err != nil{
-			log.Fatal("Error encoding")
-		}else{
-			receiveUser := s.pair[user]
-			receiveUser.conn.Write(mesBytes)
-		}
-	s.mu.Unlock()
+	receiveUser := s.pair[user]
+	if receiveUser == nil{
+		s.disconnectedUser[user] = true
+		return
+	}
+
+
+	mes := NewMessage("System", fmt.Sprintf("%s has left", user.name), true)
+	if mesBytes, err := json.Marshal(mes); err != nil {
+		log.Fatal("Error encoding")
+	} else {
+		receiveUser.conn.Write(mesBytes)
+	}
+
+	s.user_queue.EnQueue(s.pair[user])
+	delete(s.pair, s.pair[user])
+	delete(s.pair, user)
 
 }
 
